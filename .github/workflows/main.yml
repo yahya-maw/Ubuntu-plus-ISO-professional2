@@ -1,0 +1,87 @@
+name: HP-G62-Final-Mission
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: 1. 🧹 تنظيف المساحة (تجنب Exit Code 1)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost
+          sudo docker system prune -a -f
+          sudo apt-get clean
+
+      - name: 2. ⚙️ تثبيت الأدوات السيادية
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xorriso squashfs-tools wget rsync gdisk
+
+      - name: 3. 📥 تحميل الأيزو (حل خطأ 404 و Exit Code 8)
+        run: |
+          # الرابط المباشر والأكثر استقراراً من سيرفرات التوزيع
+          URL="https://cdimage.ubuntu.com/xubuntu/releases/24.04/release/xubuntu-24.04-desktop-amd64.iso"
+          wget --tries=15 --waitretry=5 --retry-connrefused -O base.iso "$URL"
+          [[ $(stat -c%s base.iso) -lt 2000000000 ]] && (echo "❌ تحميل غير مكتمل" && exit 1)
+
+      - name: 4. 📂 تفكيك الأيزو (البحث الراداري)
+        run: |
+          mkdir -p extract-cd
+          sudo xorriso -osirrox on -indev base.iso -extract / extract-cd/
+          # حل مشكلة "لم أجد ملف النظام" في الصورة 1
+          SQ_PATH=$(find extract-cd -name "*.squashfs" | head -n 1)
+          echo "SQUASH_FILE=$SQ_PATH" >> $GITHUB_ENV
+          sudo unsquashfs -d edit "$SQ_PATH"
+
+      - name: 5. 💉 الحقن الآمن (حل خطأ Same File في الصورة 2)
+        run: |
+          sudo mount --bind /dev edit/dev
+          sudo mount --bind /proc edit/proc
+          sudo mount --bind /sys edit/sys
+          
+          # الحل النهائي لمشكلة resolv.conf
+          sudo rm -f edit/etc/resolv.conf
+          echo "nameserver 8.8.8.8" | sudo tee edit/etc/resolv.conf
+
+          sudo chroot edit /bin/bash << 'EOF'
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          
+          # تثبيت البرامج (Wine + Synaptic + Mesa)
+          apt-get install -y wine synaptic mesa-utils
+          
+          # تنفيذ طلبك: حماية مجلد التنزيلات للأبد [cite: 2026-03-21]
+          mkdir -p /etc/skel/Downloads
+          echo "FOLDER PROTECTED" > /etc/skel/Downloads/LOCK.txt
+          chmod 555 /etc/skel/Downloads
+          
+          apt-get clean
+          exit
+          EOF
+
+      - name: 6. 🔌 فك الارتباط الآمن
+        run: |
+          sudo umount -l edit/dev || true
+          sudo umount -l edit/proc || true
+          sudo umount -l edit/sys || true
+
+      - name: 7. 📦 إعادة الضغط (إدارة الرام بذكاء)
+        run: |
+          sudo rm -f "${{ env.SQUASH_FILE }}"
+          # تحديد الرام بـ 3 جيجا يمنع انهيار السيرفر تماماً
+          sudo mksquashfs edit "${{ env.SQUASH_FILE }}" -comp zstd -b 1M -mem 3G
+
+      - name: 8. 💿 بناء الأيزو النهائي (دعم الإقلاع الشامل)
+        run: |
+          mkdir -p output
+          sudo xorriso -as mkisofs -r -V "HP_G62_ULTIMATE" \
+            -o output/HP-G62-System.iso \
+            -J -l -b boot/grub/i386-pc/eltorito.img \
+            -c boot.catalog -no-emul-boot -boot-load-size 4 \
+            -boot-info-table extract-cd/
+
+      - name: 9. 📤 الرفع النهائي (Artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: HP-G62-Custom-ISO
+          path: output/*.iso
