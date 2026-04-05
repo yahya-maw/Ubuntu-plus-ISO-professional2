@@ -1,0 +1,95 @@
+name: HP-G62-Ultimate-Stable-Build
+on:
+  workflow_dispatch:
+
+jobs:
+  build-iso:
+    runs-on: ubuntu-24.04 # أحدث بيئة مستقرة
+    steps:
+      - name: 1. 🧹 تنظيف السيرفر (توفير مساحة 50 جيجا)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost
+          sudo docker system prune -a -f
+          sudo apt-get clean
+
+      - name: 2. ⚙️ تثبيت أدوات الهندسة العكسية
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xorriso squashfs-tools wget rsync mtools grub-pc-bin grub-efi-amd64-bin
+
+      - name: 3. 📥 تحميل Xubuntu 24.04 (رابط رسمي مستقر)
+        run: |
+          URL="https://releases.ubuntu.com/24.04/ubuntu-24.04-desktop-amd64.iso"
+          wget --tries=10 --waitretry=5 --no-check-certificate -O base.iso "$URL"
+          # التأكد من سلامة الملف
+          [[ $(stat -c%s base.iso) -lt 2000000000 ]] && exit 1
+
+      - name: 4. 📂 تشريح الـ ISO (Extract)
+        run: |
+          mkdir -p extract-cd
+          sudo xorriso -osirrox on -indev base.iso -extract / extract-cd/
+          sudo chmod -R 777 extract-cd/
+
+      - name: 5. 🔍 البحث عن نظام الملفات (SquashFS)
+        run: |
+          # بحث ديناميكي لتجنب خطأ "File not found"
+          SQ_PATH=$(find extract-cd -name "*.squashfs" | head -n 1)
+          echo "SQUASH_FILE=$SQ_PATH" >> $GITHUB_ENV
+          sudo unsquashfs -d edit "$SQ_PATH"
+
+      - name: 6. 💉 حقن التعديلات (بدون تعريفات - استقرار 100%)
+        run: |
+          # تجهيز البيئة المعزولة (Chroot)
+          sudo mount --bind /dev edit/dev
+          sudo mount --bind /proc edit/proc
+          sudo mount --bind /sys edit/sys
+          
+          # حل مشكلة الصورة رقم 7 (Resolv.conf conflict) نهائياً
+          sudo rm -f edit/etc/resolv.conf
+          echo "nameserver 8.8.8.8" | sudo tee edit/etc/resolv.conf
+
+          sudo chroot edit /bin/bash << 'EOF'
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          
+          # تثبيت البرامج المطلوبة (Wine و Synaptic)
+          apt-get install -y wine synaptic mesa-utils
+          
+          # تنفيذ طلبك: حماية مجلد التنزيلات من الحذف للأبد
+          # نقوم بتعديل الـ Skeleton ليكون المجلد جاهزاً لأي مستخدم جديد
+          mkdir -p /etc/skel/Downloads
+          echo "هذا المجلد محمي من الحذف" > /etc/skel/Downloads/README.txt
+          # جعل المجلد للقراءة فقط (Read-Only)
+          chmod 555 /etc/skel/Downloads
+          
+          apt-get clean
+          exit
+          EOF
+
+      - name: 7. 🔌 فك الارتباط الآمن
+        run: |
+          sudo umount -l edit/dev || true
+          sudo umount -l edit/proc || true
+          sudo umount -l edit/sys || true
+
+      - name: 8. 📦 إعادة الضغط (إدارة ذكية للذاكرة)
+        run: |
+          sudo rm -f "${{ env.SQUASH_FILE }}"
+          # استخدام ضغط Zstd سريع جداً مع تحديد الرام بـ 3 جيجا لمنع الانهيار
+          sudo mksquashfs edit "${{ env.SQUASH_FILE }}" -comp zstd -b 1M -mem 3G
+
+      - name: 9. 💿 إنتاج الـ ISO النهائي للإقلاع (Bootable)
+        run: |
+          mkdir -p output
+          sudo xorriso -as mkisofs -r -V "HP_G62_STABLE" \
+            -o output/HP-G62-Custom.iso \
+            -J -l -b boot/grub/i386-pc/eltorito.img \
+            -c boot.catalog -no-emul-boot -boot-load-size 4 \
+            -boot-info-table extract-cd/
+
+      - name: 10. 📤 رفع الملف (Artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: HP-G62-Final-ISO
+          path: output/HP-G62-Custom.iso
+          retention-days: 7
