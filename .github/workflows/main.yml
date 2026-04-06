@@ -1,0 +1,71 @@
+name: Fedora-Ultra-Spin-Ultimate-Fix
+on: workflow_dispatch
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: 1. 📂 سحب الكود (Scripts Folder)
+        uses: actions/checkout@v4
+
+      - name: 2. 🧹 تنظيف المساحة للسرعة
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android "$AGENT_TOOLSDIRECTORY"
+
+      - name: 3. ⚙️ تثبيت أدوات البناء
+        run: sudo apt-get update && sudo apt-get install -y xorriso squashfs-tools aria2 curl
+
+      - name: 4. 🎯 صيد Fedora Ultra (تجاوز خطأ 404)
+        run: |
+          # استخدام رابط الأرشيف المستقر لتجنب الخطأ اللي في صورتك الأولى
+          BASE_URL="https://archives.fedoraproject.org/pub/archive/fedora/linux/releases/41/Server/x86_64/iso/"
+          ISO_FILE=$(curl -s $BASE_URL | grep -oP 'Fedora-Server-netinst-x86_64-41-.*?.iso' | head -1)
+          aria2c -x 16 -s 16 -o fedora.iso "${BASE_URL}${ISO_FILE}"
+
+      - name: 5. 📂 تفكيك النظام
+        run: |
+          mkdir -p extract-cd edit
+          sudo xorriso -osirrox on -indev fedora.iso -extract / extract-cd/
+          sudo unsquashfs -d edit $(find extract-cd -name "install.img" | head -n 1)
+
+      - name: 6. 🚀 حقن السكربتات والأدوات (Wine, Waydroid, Bottles)
+        run: |
+          sudo mkdir -p edit/opt/ultra-scripts
+          [ -d "scripts" ] && sudo cp -r scripts/* edit/opt/ultra-scripts/ && sudo chmod +x edit/opt/ultra-scripts/*
+          
+          sudo mount --bind /dev edit/dev
+          sudo mount --bind /proc edit/proc
+          sudo mount --bind /sys edit/sys
+          sudo rm -f edit/etc/resolv.conf
+          echo "nameserver 8.8.8.8" | sudo tee edit/etc/resolv.conf
+
+          sudo chroot edit /bin/bash << 'EOF'
+          # التثبيت السريع للترسانة
+          dnf -y install xfce4-panel xfce4-session breeze-gtk breeze-icon-theme wine bottles waydroid
+          # تعريفات Intel وحماية التنزيلات
+          dnf -y install intel-gpu-tools libva-intel-driver
+          mkdir -p /etc/skel/Downloads && chmod 555 /etc/skel/Downloads
+          exit
+          EOF
+
+      - name: 7. 📦 إعادة الضغط (Zstd)
+        run: |
+          sudo umount -l edit/dev edit/proc edit/sys || true
+          OLD_IMG=$(find extract-cd -name "install.img" | head -n 1)
+          sudo rm -f "$OLD_IMG"
+          sudo mksquashfs edit "$OLD_IMG" -comp zstd -noappend
+
+      - name: 8. 💿 إنتاج الأيزو (تصحيح مسارات Fedora Boot)
+        run: |
+          # حل مشكلة Exit Code 32: فيدورا تستخدم مسارات مختلفة عن أوبونتو
+          mkdir -p output
+          sudo xorriso -as mkisofs -r -V "FEDORA_ULTRA" \
+            -o output/Fedora-Ultra-Spin-HPG62.iso \
+            -J -l -b images/eltorito.img \
+            -c boot.catalog -no-emul-boot -boot-load-size 4 \
+            -boot-info-table -eltorito-alt-boot -e images/efiboot.img -no-emul-boot extract-cd/
+
+      - name: 9. 📤 الرفع النهائي
+        uses: actions/upload-artifact@v4
+        with:
+          name: Fedora-Ultra-Spin-ISO
+          path: output/*.iso
