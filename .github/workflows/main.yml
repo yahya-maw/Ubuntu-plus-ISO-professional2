@@ -1,0 +1,88 @@
+name: Ultimate-Xubuntu-Remaster-V5
+on: workflow_dispatch
+
+jobs:
+  build-iso:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: 1. تحرير مساحة السيرفر (60 جيجا)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost
+          sudo docker system prune -af
+
+      - name: 2. تثبيت أدوات البناء الرسمية
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xorriso squashfs-tools wget rsync mtools sed
+
+      - name: 3. تحميل Xubuntu 24.04 (الرابط الفولاذي)
+        run: |
+          # الرابط ده هو المسار الرسمي والمباشر لنسخة Xubuntu
+          URL="https://cdimage.ubuntu.com/xubuntu/releases/24.04/release/xubuntu-24.04-desktop-amd64.iso"
+          wget --retry-connrefused --waitretry=1 --read-timeout=20 --timeout=15 -t 10 -O base.iso "$URL"
+          [[ $(stat -c%s base.iso) -lt 2500000000 ]] && exit 1
+
+      - name: 4. تفكيك الأيزو واستخراج ملفات النظام
+        run: |
+          mkdir -p extract-cd
+          sudo xorriso -osirrox on -indev base.iso -extract / extract-cd/
+          # حذف الأيزو فوراً لتوفير مساحة للضغط لاحقاً
+          rm base.iso
+          SQ_FILE=$(find extract-cd -name "*.squashfs" | head -n 1)
+          echo "SQ_PATH=$SQ_FILE" >> $GITHUB_ENV
+          sudo unsquashfs -d edit "$SQ_FILE"
+
+      - name: 5. حل معضلة resolv.conf (مضاد لخطأ Same File)
+        run: |
+          sudo mount --bind /dev edit/dev
+          sudo mount --bind /proc edit/proc
+          sudo mount --bind /sys edit/sys
+          
+          # الحل الجذري: مسح الرابط الوهمي تماماً وإنشاء ملف حقيقي
+          sudo rm -f edit/etc/resolv.conf
+          echo "nameserver 8.8.8.8" | sudo tee edit/etc/resolv.conf
+
+      - name: 6. الحقن الداخلي وتثبيت البرامج (Waydroid + Wine + Synaptic)
+        run: |
+          sudo chroot edit /bin/bash << 'EOF'
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y wine synaptic mesa-utils
+          
+          # تنفيذ طلبك: تأمين مجلد التنزيلات للأبد [cite: 2026-03-21]
+          mkdir -p /etc/skel/Downloads
+          echo "PROTECTED_FOLDER" > /etc/skel/Downloads/.lock
+          # جعل المجلد للقراءة فقط للمستخدم الجديد
+          chmod 555 /etc/skel/Downloads
+          
+          apt-get clean
+          exit
+          EOF
+
+      - name: 7. تنظيف البيئة قبل الضغط
+        run: |
+          # استعادة رابط resolv.conf الأصلي لضمان عمل النت بعد التثبيت
+          sudo rm -f edit/etc/resolv.conf
+          sudo ln -s ../run/systemd/resolve/stub-resolv.conf edit/etc/resolv.conf
+          sudo umount -l edit/dev edit/proc edit/sys || true
+
+      - name: 8. إعادة بناء نظام الملفات (الضغط العالي)
+        run: |
+          sudo rm -f "${{ env.SQ_PATH }}"
+          # استخدام Zstd لضمان السرعة وعدم انهيار السيرفر
+          sudo mksquashfs edit "${{ env.SQ_PATH }}" -comp zstd -b 1M -mem 4G -noappend
+
+      - name: 9. إنتاج الأيزو النهائي (دعم كامل لـ HP G62)
+        run: |
+          mkdir -p output
+          sudo xorriso -as mkisofs -r -V "XUBUNTU_HP_G62" \
+            -o output/Xubuntu-Final-Custom.iso \
+            -J -l -b boot/grub/i386-pc/eltorito.img \
+            -c boot.catalog -no-emul-boot -boot-load-size 4 \
+            -boot-info-table extract-cd/
+
+      - name: 10. رفع الملف الجاهز
+        uses: actions/upload-artifact@v4
+        with:
+          name: HP-G62-Modified-ISO
+          path: output/*.iso
