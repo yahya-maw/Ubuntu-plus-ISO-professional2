@@ -1,0 +1,90 @@
+name: Fedora-Ultra-Spin-Fix
+on: workflow_dispatch
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: 1. 📂 سحب الكود (Scripts Folder)
+        uses: actions/checkout@v4
+
+      - name: 2. 🧹 تنظيف المساحة للسرعة
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android "$AGENT_TOOLSDIRECTORY"
+
+      - name: 3. ⚙️ تثبيت أدوات البناء
+        run: sudo apt-get update && sudo apt-get install -y xorriso squashfs-tools aria2 curl
+
+      - name: 4. 🎯 صيد Fedora Ultra (رابط مباشر ومحمي من الـ 404)
+        run: |
+          # استخدام مرآة أساسية مستقرة لتجنب أخطاء التحويل (Redirects)
+          BASE_URL="https://archives.fedoraproject.org/pub/archive/fedora/linux/releases/41/Server/x86_64/iso/"
+          ISO_FILE=$(curl -s $BASE_URL | grep -oP 'Fedora-Server-netinst-x86_64-41-.*?.iso' | head -1)
+          # إضافة --follow-metalink و --check-certificate لضمان الاستقرار
+          aria2c -x 16 -s 16 --retry-wait=5 --max-tries=10 -o fedora.iso "${BASE_URL}${ISO_FILE}"
+
+      - name: 5. 📂 تشريح النظام
+        run: |
+          mkdir -p extract-cd edit
+          sudo xorriso -osirrox on -indev fedora.iso -extract / extract-cd/
+          IMG_FILE=$(find extract-cd -name "install.img" | head -n 1)
+          sudo unsquashfs -d edit "$IMG_FILE"
+
+      - name: 6. 🚀 دمج السكربتات (Scripts Folder) وحل الشبكة
+        run: |
+          sudo mkdir -p edit/opt/ultra-scripts
+          [ -d "scripts" ] && sudo cp -r scripts/* edit/opt/ultra-scripts/ && sudo chmod +x edit/opt/ultra-scripts/*
+          
+          # تثبيت مسار الشبكة لمنع خطأ الـ Same File
+          sudo mount --bind /dev edit/dev
+          sudo mount --bind /proc edit/proc
+          sudo mount --bind /sys edit/sys
+          sudo rm -f edit/etc/resolv.conf
+          echo "nameserver 8.8.8.8" | sudo tee edit/etc/resolv.conf
+
+      - name: 7. 💉 حقن الـ Ultra KDE Look (XFCE base)
+        run: |
+          sudo chroot edit /bin/bash << 'EOF'
+          dnf -y install xfce4-panel xfce4-session xfce4-settings xfconf breeze-gtk breeze-icon-theme
+          
+          # تعريفات Intel لـ HP G62 وحماية التنزيلات
+          dnf -y install intel-gpu-tools libva-intel-driver mesa-dri-drivers
+          mkdir -p /etc/skel/.config/xfce4/xfconf/xfce-perchannel-xml/
+          
+          # إعداد الـ Panel السفلي (KDE Look)
+          cat <<'XF' > /etc/skel/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml
+          <?xml version="1.0" encoding="UTF-8"?>
+          <channel name="xfce4-panel" version="1.0">
+            <property name="panels" type="array">
+              <value type="int" value="1"/>
+            </property>
+            <property name="panel-1" type="empty">
+              <property name="position" type="string" value="p=10;x=0;y=0"/>
+              <property name="size" type="uint" value="48"/>
+            </property>
+          </channel>
+          XF
+
+          mkdir -p /etc/skel/Downloads && chmod 555 /etc/skel/Downloads
+          exit
+          EOF
+
+      - name: 8. 📦 إعادة الضغط (Zstd)
+        run: |
+          sudo umount -l edit/dev edit/proc edit/sys || true
+          OLD_IMG=$(find extract-cd -name "install.img" | head -n 1)
+          sudo rm -f "$OLD_IMG"
+          sudo mksquashfs edit "$OLD_IMG" -comp zstd -noappend
+
+      - name: 9. 💿 إنتاج أيزو Fedora Ultra Spin
+        run: |
+          mkdir -p output
+          sudo xorriso -as mkisofs -r -V "FEDORA_ULTRA" \
+            -o output/Fedora-Ultra-Spin-HPG62.iso \
+            -J -l -b isolinux/isolinux.bin -c isolinux/boot.cat \
+            -no-emul-boot -boot-load-size 4 -boot-info-table extract-cd/
+
+      - name: 10. 📤 الرفع
+        uses: actions/upload-artifact@v4
+        with:
+          name: Fedora-Ultra-Spin-ISO
+          path: output/*.iso
